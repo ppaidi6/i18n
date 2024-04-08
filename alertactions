@@ -1,0 +1,906 @@
+import React, { FunctionComponent, useState, useEffect, createContext, useContext } from 'react';
+import { Form, Col, Row, Table } from 'react-bootstrap';
+import Select from 'react-select';
+import { useFeature } from 'flagged';
+import * as types from './types';
+import DropdownIndicator from 'components/DropdownIndicator';
+import RemoveIcon from 'assets/icons/particle/actions/disable.svg';
+import AddIcon from 'assets/icons/particle/actions/add.svg';
+import EditIcon from 'assets/icons/particle/actions/edit.svg';
+import { ALPHANUMERIC_DASH_REGEX, URL_REGEX, OWASP_HEADER, isJSON } from 'utils/helpers';
+import { isEmpty, capitalize, toLower, cloneDeep } from 'lodash';
+import ViewIcon from 'assets/icons/particle/actions/viewDetails.svg';
+import CopyIcon from 'assets/icons/particle/actions/copy.svg';
+import Editor, { useMonaco } from "@monaco-editor/react";
+import notify from 'components/Toast/notify';
+import AlertsModalForm, { PREDEFINED_VARIABLES } from './AlertsModalForm';
+
+const AlertActions: FunctionComponent<types.IAlertActions> = ({
+  onClose,
+  onSave,
+  selectedAction,
+  readOnly,
+}) => {
+  const ALERTING_P3_FLAG = useFeature('alertingP3');
+
+  const mimeTypeOptions = [
+    { label: 'application/json', value: 'application/json' },
+  ]
+
+  const eventTypeOptions = [
+    { label: 'Vulnerability', value: 'vulnerability' },
+    { label: 'Business Risk', value: 'business risk' },
+    ...(ALERTING_P3_FLAG ? [{ label: 'Attack', value: 'attack' }] : [])
+  ]
+
+  const encodingOptions = [
+    { label: 'UTF-8', value: 'UTF-8' },
+  ]
+  const httpMethodOptions = [
+    { label: 'POST', value: 'POST' },
+  ]
+  const authOptions = [
+    { label: 'None', value: 'none' },
+    { label: 'Basic', value: 'basic' },
+  ]
+
+  const ACTION_TYPE = 'HTTP Request'
+  const METHOD = 'POST'
+  const ENCODING = 'UTF-8'
+  const EVENT_TYPE = 'vulnerability'
+
+  const [tabIndex, setTabIndex] = useState<any>(0);
+  const [name, setName] = useState<any>(selectedAction.actionName || '');
+  const [type, setType] = useState<any>(selectedAction.actionType || ACTION_TYPE);
+  const [eventType, setEventType] = useState<any>(selectedAction.eventType || EVENT_TYPE);
+  const [method, setMethod] = useState<any>(selectedAction.httpMethod || METHOD);
+  const [url, setUrl] = useState<any>(selectedAction.targetUrl || '');
+  const [encoding, setEncoding] = useState<any>(selectedAction.characterEncoding || ENCODING);
+  const [authentication, setAuthentication] = useState<any>(selectedAction.authentication || { type: '', username: '', password: '' })
+  const [headers, setHeaders] = useState<any>(selectedAction.headers || [])
+  const [vulnPayload, setVulnPayload] = useState<any>( selectedAction.eventType  === 'vulnerability' ? selectedAction.payloadTemplate :  '{}')
+  const [brmPayload, setBrmPayload] = useState<any>(selectedAction.eventType  === 'business risk' ? selectedAction.payloadTemplate :  '{}')
+  const [attackPayload, setAttackPayload] = useState<any>(selectedAction.eventType  === 'attack' ? selectedAction.payloadTemplate :  '{}')
+  const [copiedVariableIdx, setCopiedVariableIdx] = useState<any>(null)
+  const [showPassword, toggleShowPassword] = useState(false)
+  const [invalidJSON, setInvalidJSON] = useState<boolean>(false);
+  const [completedTabs, setCompletedTabs] = useState<any>({
+    0: isEmpty(selectedAction) ? false : true,
+    1: isEmpty(selectedAction) ? false : true,
+    2: isEmpty(selectedAction) ? false : true,
+    3: isEmpty(selectedAction) ? false : true,
+    4: isEmpty(selectedAction) ? false : true,
+    5: isEmpty(selectedAction) ? false : true,
+  });
+  const [errorMessage, setErrorMessage] = useState<string>('');
+
+  const monaco = useMonaco();
+
+  useEffect(() => {
+    if (monaco) {
+      monaco.editor.defineTheme('secure-app', {
+        base: 'vs',
+        inherit: false,
+        rules: [{ background: 'FFFFFF' },
+          { token: 'comment', foreground: '861F49', fontStyle: 'italic' },
+          { token: 'number', foreground: '7B66FF' },
+          { token: 'string', foreground: '6929C4', fontStyle: 'bold' },
+      ],
+        colors: {
+          'editor.lineHighlightBackground': '#F1F3F5',
+          'editorLineNumber.foreground': '#585E67',
+          'editorLineNumber.activeForeground': '#B8A2DD',
+          'editorError.foreground': '#861F49',
+          'scrollbarSlider.background': '#C5C7CA',
+          'scrollbarSlider.hoverBackground': '#8C9095',
+          'scrollbarSlider.activeBackground': '#C5C7CA',
+          'editorWidget.background': '#ECE9FF',
+          'textLink.foreground': '#585E67',
+          'textLink.activeForeground': '#6929C4',
+        }
+      });
+      monaco.editor.setTheme('secure-app');
+    }
+  }, [monaco]);
+
+  useEffect(() => {
+    if (tabIndex === 0) {
+      if (name?.length && name.match(ALPHANUMERIC_DASH_REGEX) && type) {
+        handleCompleteTab(0)
+      } else {
+        handleIncompleteTab(0)
+      }
+    }
+  }, [name, type, tabIndex])
+
+  useEffect(() => {
+    if (tabIndex === 1) {
+      if (method && encoding && url.length > 0 && url.match(URL_REGEX) !== null) {
+        handleCompleteTab(1)
+      } else {
+        handleIncompleteTab(1)
+      }
+    }
+  }, [method, encoding, url, tabIndex])
+
+  useEffect(() => {
+    if (tabIndex === 2) {
+      if (toLower(authentication.type) === 'none') {
+        handleCompleteTab(2)
+      } else if (toLower(authentication.type) === 'basic' && authentication.username && authentication.password && authentication.username.trim().length !== 0) {
+        handleCompleteTab(2)
+      } else {
+        handleIncompleteTab(2)
+      }
+    }
+  }, [authentication, tabIndex])
+
+  useEffect(() => {
+    if (tabIndex === 3) {
+      const incomplete = headers.filter(header => header.key.match(ALPHANUMERIC_DASH_REGEX) === null
+        || !header.value.length
+        || header.value.match(OWASP_HEADER) !== null);
+      const keys = headers.reduce((filtered, header) => {
+        if (header.key?.length > 0) {
+          filtered.push(header.key)
+        }
+        return filtered
+      }, [])
+      const hasDuplicate = keys.some((item, idx) => keys.indexOf(item) != idx);
+      if (hasDuplicate) {
+        setErrorMessage('Duplicate header keys are not allowed, please join multiple values with a comma.')
+        return handleIncompleteTab(3)
+      } else {
+        setErrorMessage('')
+      }
+      if (incomplete.length) {
+        handleIncompleteTab(3)
+      } else {
+        handleCompleteTab(3)
+      }
+
+    }
+  }, [headers, tabIndex])
+
+  useEffect(() => {
+    if (tabIndex === 4) {
+      if (invalidJSON) {
+        handleIncompleteTab(4)
+      } else {
+        handleCompleteTab(4)
+      }
+    }
+  }, [invalidJSON, tabIndex])
+
+  useEffect(() => {
+    if (showPassword) {
+      setTimeout(() => {
+        toggleShowPassword(false)
+      }, 6000)
+    } else {
+      window.analytics.track('User Behavior', {
+        category: 'View',
+        value: `Click to show password`,
+        page: 'Alerts',
+      });
+    }
+  }, [showPassword])
+
+  const handleEditorChange = (value, event) => {
+    const isEditorPayloadValid = !isEmpty(value) && isJSON(value);
+    isEditorPayloadValid ? setInvalidJSON(false) : setInvalidJSON(true);
+    if (isEditorPayloadValid && eventType === 'vulnerability') {
+      setVulnPayload(JSON.stringify(JSON.parse(value), null, 2));
+    } else if (isEditorPayloadValid && eventType === 'business risk') {
+      setBrmPayload(JSON.stringify(JSON.parse(value), null, 2));
+    } else if (isEditorPayloadValid && eventType === 'attack') {
+      setAttackPayload(JSON.stringify(JSON.parse(value), null, 2));
+    }
+  }
+
+  const getEditorPayload = () => {
+    if (eventType === 'vulnerability') {
+      return vulnPayload;
+    } else if (eventType === 'business risk') {
+      return brmPayload;
+    } else if (eventType === 'attack') {
+      return attackPayload;
+    }
+    return '{}'
+  }
+
+  const handleEditorValidation = (markers) => {
+    markers.forEach(marker => marker.message);
+    if (markers.length > 0) {
+      setInvalidJSON(true)
+    } else {
+      setInvalidJSON(false)
+    }
+  }
+
+  const handleCopyToClipboard = async (data, variable = true) => {
+    window.analytics.track('User Behavior', {
+      category: 'Copy',
+      value: `Copy (${variable ? 'predefined variable' : 'cURL command'})`,
+      page: 'Alerts',
+    });
+    if ('clipboard' in navigator) {
+      await navigator.clipboard.writeText(data);
+      if (variable) {
+        setCopiedVariableIdx(data)
+      } else {
+        notify.success('Copied!')
+      }
+    }
+    return;
+  };
+
+  const handleCompleteTab = (tabIdx) => {
+    setCompletedTabs({ ...completedTabs, [tabIdx]: true })
+  }
+  const handleIncompleteTab = (tabIdx) => {
+    setCompletedTabs({ ...completedTabs, [tabIdx]: false })
+  }
+
+  const getCensoredPassword = (pw) => {
+    return showPassword ? pw : '*'.repeat(pw?.length);
+  }
+
+  const getOptionValue = (val, options?: any[]) => {
+    if (options && options.length) {
+      let result = options.find(option => option.value === val)
+      return result;
+    }
+    return ({ label: capitalize(val), value: val })
+  }
+
+  const handleChangeHeader = (index, value, type) => {
+    let items = cloneDeep(headers);
+    items[index][type] = value;
+    setHeaders(items)
+  }
+
+  const handleRemoveRow = (type, index) => {
+    let newHeaders;
+    if (type === 'header') {
+      newHeaders = [...headers]
+      newHeaders.splice(index, 1)
+      return setHeaders([...newHeaders])
+    }
+  }
+
+  const formatcURL = (maskedPw=false) => {
+    const payload = getEditorPayload();
+    let request = '';
+    request += `curl ${url}`
+    request += ` --request POST`
+    request += ` --header 'Accept: application/json'`
+    headers.length && headers.forEach(header => request += ` --header '${header.key}: ${header.value}'`)
+    request += ` --header 'Content-Type: application/json'`
+    if (toLower(authentication.type) === 'basic') {
+      request += ` --user '${authentication.username}:${maskedPw
+        ? getCensoredPassword(authentication?.password)
+        : authentication?.password}'`
+    }
+    request += ` --data '${payload}'`
+    return request;
+  }
+
+  const TabStep1 = ({
+    summary
+  }: { summary?: boolean }) => {
+    return (
+      <div className="form-container formRowSection">
+        {summary ? <div className='title'>General Information</div> : ''}
+        <Form>
+          <Form.Row>
+            <Col xs={6}>
+              <Form.Label>Name</Form.Label>
+              <Form.Control
+                key="actionName"
+                required
+                isInvalid={name.length && name.match(ALPHANUMERIC_DASH_REGEX) === null}
+                aria-label="name"
+                onChange={(e) => setName(e.target.value)}
+                value={name}
+                placeholder="Enter Action Name"
+              />
+              <Form.Control.Feedback type="invalid">
+                Valid characters include: A-Z a-z 0-9 _ -
+              </Form.Control.Feedback>
+            </Col>
+          </Form.Row>
+          <Form.Row>
+            <Col xs={3}>
+              <Form.Label>Event Type</Form.Label>
+              <Select
+                key='eventType'
+                aria-label='event type'
+                options={eventTypeOptions}
+                value={getOptionValue(eventType, eventTypeOptions)}
+                onChange={(option) => setEventType(option.value)}
+                className='form-select'
+                classNamePrefix="form-select"
+                components={{ DropdownIndicator }}
+                defaultValue={eventTypeOptions[0]}
+              />
+            </Col>
+          </Form.Row>
+        </Form>
+      </div>
+    );
+  }
+
+  const TabStep2 = ({
+    summary
+  }: { summary?: boolean }) => {
+    return (
+      <div className="form-container formRowSection">
+        {summary ? <div className='title'>`{type}`</div> : ''}
+        <Form>
+          <Form.Row>
+            <Col xs={2}>
+              <Form.Label>Method Type</Form.Label>
+              <Select
+                key='method'
+                name='method'
+                options={httpMethodOptions}
+                value={getOptionValue(method, httpMethodOptions)}
+                onChange={(option) => setMethod(option.value)}
+                className='form-select'
+                classNamePrefix="form-select"
+                components={{ DropdownIndicator }}
+                defaultValue={httpMethodOptions[0]}
+              />
+            </Col>
+          </Form.Row>
+          <Form.Row>
+            <Col xs={2}>
+              <Form.Label>Encoding</Form.Label>
+              <Select
+                key='encoding'
+                name='encoding'
+                options={encodingOptions}
+                value={getOptionValue(encoding, encodingOptions)}
+                onChange={(option) => setEncoding(option.value)}
+                className='form-select'
+                classNamePrefix="form-select"
+                components={{ DropdownIndicator }}
+                defaultValue={encodingOptions[0]}
+              />
+            </Col>
+          </Form.Row>
+          <Form.Row>
+            <Col xs={8}>
+              <Form.Label>Raw URL</Form.Label>
+              <Form.Control
+                key="rawURL"
+                required
+                isInvalid={url.length > 0 && url.match(URL_REGEX) === null}
+                aria-label='url'
+                id='url'
+                onChange={(e) => setUrl(e.target.value.trim())}
+                value={url}
+                placeholder="Enter your URL"
+              />
+              <Form.Control.Feedback type="invalid">
+                Endpoints must be a valid url.
+              </Form.Control.Feedback>
+            </Col>
+          </Form.Row>
+        </Form>
+      </div>
+    )
+  }
+
+  const TabStep3 = ({
+    summary
+  }: { summary?: boolean }) => {
+    return (
+      <div className="form-container formRowSection">
+        {summary ? <div className='title'>Security</div> : ''}
+        <Form>
+          <Form.Row>
+            <Col xs={2}>
+              <Form.Label>Authentication Type</Form.Label>
+              <Select
+                key='authType'
+                name='authType'
+                options={authOptions}
+                value={getOptionValue(authentication.type, authOptions)}
+                onChange={(option) => setAuthentication(prev => ({ ...prev, type: option.value }))}
+                className='form-select'
+                classNamePrefix="form-select"
+                components={{ DropdownIndicator }}
+              />
+            </Col>
+          </Form.Row>
+          {toLower(authentication.type) === 'basic' && (
+            <>
+              <Form.Row>
+                <Col xs={8}>
+                  <Form.Label>Username</Form.Label>
+                  <Form.Control
+                    key="username"
+                    required
+                    aria-label="username"
+                    isInvalid={authentication.username.length > 0 && authentication.username.trim().length === 0}
+                    isValid={!!authentication.username}
+                    id='username'
+                    onChange={(e) => setAuthentication(prev => ({ ...prev, username: e.target.value }))}
+                    value={authentication.username}
+                    placeholder="Enter Username"
+                  />
+                  <Form.Control.Feedback type="invalid">
+                    Username cannot be empty
+                  </Form.Control.Feedback>
+                </Col>
+              </Form.Row>
+              <Form.Row>
+                <Col xs={8}>
+                  <Form.Label>Password</Form.Label>
+                  <Form.Control
+                    key="password"
+                    type={showPassword ? 'text' : 'password'}
+                    required
+                    aria-label="password"
+                    id='password'
+                    isValid={!!authentication.password}
+                    onChange={(e) => setAuthentication(prev => ({ ...prev, password: e.target.value }))}
+                    value={authentication.password}
+                    placeholder="Enter Password"
+                  />
+                  <Form.Control.Feedback type="invalid">
+                    Password cannot be empty
+                  </Form.Control.Feedback>
+                </Col>
+                <ViewIcon className="show-icon" data-testid="show-password-icon" onClick={() => toggleShowPassword(!showPassword)} />
+              </Form.Row>
+            </>
+          )
+          }
+        </Form>
+      </div>
+    )
+  }
+
+  const TabStep4 = ({
+    summary
+  }: { summary?: boolean }) => {
+    return (
+      <div className="form-container">
+        <Form>
+          {summary ? <div className='title'>Headers</div> : ''}
+
+          {headers.length > 0 && headers.map((header, idx) => {
+            return (
+              <div className="rowEditable" key={idx}>
+                <Form.Row className="formRowSection">
+                  <Form.Group as={Col}>
+                    <Form.Label>Header Name</Form.Label>
+                    <Form.Control
+                      key={`headerName${idx}`}
+                      required
+                      isInvalid={header.key && header.key.match(ALPHANUMERIC_DASH_REGEX) === null}
+                      name="headerName"
+                      id='headerName'
+                      onChange={(e) => handleChangeHeader(idx, e.target.value, 'key')}
+                      value={header.key}
+                      placeholder="Enter Name"
+                    />
+                    <Form.Control.Feedback type="invalid">
+                      Valid characters include: A-Z a-z - _
+                    </Form.Control.Feedback>
+                  </Form.Group>
+                  <Form.Group as={Col}>
+                    <Form.Label>Default Value</Form.Label>
+                    <Form.Control
+                      key="headerVal"
+                      required
+                      isInvalid={header.value && header.value.match(OWASP_HEADER) !== null}
+                      name="headerVal"
+                      id='headerVal'
+                      onChange={(e) => handleChangeHeader(idx, e.target.value, 'value')}
+                      value={header.value}
+                      placeholder="Enter Value"
+                    />
+                    <Form.Control.Feedback type="invalid">
+                      Invalid header value
+                    </Form.Control.Feedback>
+                  </Form.Group>
+                </Form.Row>
+                <div className="rowRemove">
+                  <RemoveIcon className="remove-icon" data-testid="remove-row-icon" onClick={e => handleRemoveRow('header', idx)} />
+                </div>
+              </div>
+            )
+          })}
+        </Form>
+        <div className="add-row" data-testid="add-row" onClick={() => {
+          window.analytics.track('User Behavior', {
+            category: 'View',
+            value: `Open alert action modal to ${isEmpty(selectedAction) ? 'create' : 'update'} action`,
+            page: 'Alerts',
+          });
+          setHeaders([...headers, { key: '', value: '' }])
+        }}>
+          <AddIcon className="add-icon" />
+          <span>Add Header</span>
+        </div>
+        <div className="error-message">{errorMessage}</div>
+      </div>
+    )
+  }
+
+  const TabStep5 = ({
+    summary
+  }: { summary?: boolean }) => {
+    return (
+      <div className="form-container formRowSection">
+        {summary ? <div className='title'>Payload</div> : ''}
+        <Form>
+          <Row>
+            <Col xs={5}>
+              <Form.Group as={Row} className="formRowSection noBorder">
+                <Form.Label>MIME Type</Form.Label>
+                <Select
+                  key='mimeType'
+                  name='mimeType'
+                  options={mimeTypeOptions}
+                  defaultValue={mimeTypeOptions[0]}
+                  className='form-select'
+                  classNamePrefix="form-select"
+                  components={{ DropdownIndicator }}
+                />
+              </Form.Group>
+              <Form.Group as={Row} className="formRowSection noBorder">
+                <Form.Label>Predefined Variables</Form.Label>
+                <div className="predefined-variables-container">
+                  <Table bordered hover className="predefined-variables">
+                    <tbody>
+                      {PREDEFINED_VARIABLES[eventType] && PREDEFINED_VARIABLES[eventType].map((variable, idx) => (
+                        <tr key={idx}>
+                          <td className="variable">
+                            <div className="var-name">{variable.value}</div>
+                            <div className="copy">
+                              {copiedVariableIdx === variable.value
+                                ? <div className="copied">Copied!</div>
+                                : null}
+                              <CopyIcon className="copy-btn-icon" data-testid="copy-icon" onClick={() => handleCopyToClipboard(variable.value)} />
+                            </div>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </Table>
+                </div>
+              </Form.Group>
+            </Col>
+            <Col xs={7}>
+              <Form.Label>Editor</Form.Label>
+              {invalidJSON && <div className="error-message bottom">Please fix any errors and format your JSON correctly in the editor below to proceed to the next step.</div>}
+              <Editor
+                height="250px"
+                defaultLanguage="json"
+                defaultValue={getEditorPayload()}
+                onChange={handleEditorChange}
+                onValidate={handleEditorValidation}
+                options={{
+                  minimap: { enabled: false },
+                  formatOnType: true,
+                  wordWrap: 'on',
+                  autoIndent: 'full',
+                  automaticLayout: true,
+                }}
+                theme="secure-app"
+              />
+            </Col>
+          </Row>
+        </Form>
+      </div>
+    )
+  }
+
+  const TabStep6 = () => {
+    return (
+      <div className="form-container">
+         <div className="summary-section">
+          <div className="summary-header">
+            cURL
+            <CopyIcon className="copy-btn-icon" data-testid="copy-icon" onClick={() => handleCopyToClipboard(formatcURL(), false)} />
+          </div>
+          <table className="summary-table">
+            <thead>
+              <tr>
+                <th>Request</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>{formatcURL(true)}</code></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div className="summary-section">
+          <div className="summary-header">
+            General Information
+            {!readOnly && <EditIcon className="edit-icon" onClick={() => {
+              window.analytics.track('User Behavior', {
+                category: 'View',
+                value: `Click edit to return to 'General Information' step in alert actions.`,
+                page: 'Alerts',
+              });
+              setTabIndex(0);
+            }} />}
+          </div>
+          <table className="summary-table">
+            <thead>
+              <tr>
+                <th>Name</th>
+                <th>Event Type</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>{name && name.trim()}</td>
+                <td className="text-capitalize">{eventType}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div className="summary-section">
+          <div className="summary-header">
+            Actions
+            {!readOnly && <EditIcon className="edit-icon" onClick={() => {
+              window.analytics.track('User Behavior', {
+                category: 'View',
+                value: `Click edit to return to 'Actions' step in alert actions.`,
+                page: 'Alerts',
+              });
+              setTabIndex(1);
+            }} />}
+          </div>
+          <table className="summary-table">
+            <thead>
+              <tr>
+                <th>Method Type</th>
+                <th>Encoding</th>
+                <th>Raw URL</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>{method}</td>
+                <td>{encoding}</td>
+                <td>{url}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div className="summary-section">
+          <div className="summary-header">
+            Security
+            {!readOnly && <EditIcon className="edit-icon" onClick={() => {
+              window.analytics.track('User Behavior', {
+                category: 'View',
+                value: `Click edit to return to 'Security' step in alert actions.`,
+                page: 'Alerts',
+              });
+              setTabIndex(2);
+            }} />}
+          </div>
+          <table className="summary-table">
+            <thead>
+              <tr>
+                <th>Authentication Type</th>
+                {toLower(authentication.type) === 'basic' && (
+                  <>
+                    <th>Username</th>
+                    <th>Password</th>
+                  </>
+                )}
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>{authentication.type ? capitalize(authentication.type) : 'None'}</td>
+                {toLower(authentication.type) === 'basic' && (
+                  <>
+                    <td>{authentication.username}</td>
+                    <td>
+                      <div>
+                        {getCensoredPassword(authentication?.password)}
+                        <ViewIcon className="show-icon inline" data-testid="show-password-icon" onClick={() => toggleShowPassword(!showPassword)} />
+                      </div>
+                    </td>
+                  </>
+                )}
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div className="summary-section">
+          <div className="summary-header">
+            Custom Headers
+            {!readOnly && <EditIcon className="edit-icon" onClick={() => {
+              window.analytics.track('User Behavior', {
+                category: 'View',
+                value: `Click edit to return to 'Custom Headers' step in alert actions.`,
+                page: 'Alerts',
+              });
+              setTabIndex(3);
+            }} />}
+          </div>
+          <table className="summary-table">
+            <thead>
+              <tr>
+                <th>Header Key</th>
+                <th>Header Value</th>
+              </tr>
+            </thead>
+            <tbody>
+              {headers.length ? headers.map(header => {
+                return (
+                  <tr key={header.key}>
+                    <td>{header.key}</td>
+                    <td>{header.value}</td>
+                  </tr>
+                )
+              }) : <tr><td>None</td></tr>}
+            </tbody>
+          </table>
+        </div>
+        <div className="summary-section">
+          <div className="summary-header">
+            Payload
+            {!readOnly && <EditIcon className="edit-icon" onClick={() => {
+              window.analytics.track('User Behavior', {
+                category: 'View',
+                value: `Click edit to return to 'Payload' step in alert actions.`,
+                page: 'Alerts',
+              });
+              setTabIndex(4);
+            }} />}
+          </div>
+          <table className="summary-table">
+            <thead>
+              <tr>
+                <th>Data</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>{getEditorPayload()}</code></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    )
+  }
+
+  const tabsContextList: any = {
+    tabs: [
+      {
+        name: 'General Information',
+        title: 'Enter General Info',
+        subtitle: 'Create a name for your action.',
+        content: TabStep1({ summary: false })
+      },
+      {
+        name: 'Actions',
+        title: 'Enter Action Details',
+        subtitle: 'Enter the Raw URL of your http request.',
+        content: TabStep2({ summary: false })
+      },
+      {
+        name: 'Security',
+        title: 'Set Up Authentication',
+        subtitle: 'If the communication is not encrypted we recommend that you do not use any authentication.',
+        content: TabStep3({ summary: false })
+      },
+      {
+        name: 'Headers',
+        title: 'Add Custom Headers',
+        subtitle: 'Specify custom headers for the request (Optional).',
+        content: TabStep4({ summary: false })
+      },
+      {
+        name: 'Payload',
+        title: 'Add Payload',
+        subtitle: `An alert action will trigger
+        ${eventType === 'business risk' ? 'when there is a change in' : 'for any new'} ${eventType} detected.
+         You can copy predefined variables from the list below and paste it into the editor. The payload must be in JSON format.`,
+        content: TabStep5({ summary: false })
+      },
+      {
+        name: 'Confirm',
+        title: 'Review Summary',
+        subtitle: '',
+        content: TabStep6()
+      }
+    ]
+  };
+  const TabsContext = createContext(tabsContextList);
+  const { tabs } = useContext(TabsContext);
+
+
+  const handleNext = () => {
+    window.analytics.track('User Behavior', {
+      category: 'View',
+      value: `Go to next step in ${isEmpty(selectedAction) ? 'Add' : 'Edit'} action modal`,
+      page: 'Alerts',
+    });
+    return setTabIndex(curr => curr + 1)
+  };
+
+  const handleSave = () => {
+    const data = {
+      ...selectedAction,
+      actionName: name.trim(),
+      actionType: type === 'HTTP Request' ? 'Http' : type,
+      httpMethod: method,
+      targetUrl: encodeURI(url),
+      characterEncoding: encoding,
+      authentication: encodeAuthentication(authentication),
+      headers,
+      payloadTemplate: getEditorPayload(),
+      eventType: eventType,
+    };
+    
+    onSave(data);
+    return setTabIndex(0)
+  }
+
+  const encodeAuthentication = (auth) => {
+    if (auth.type === 'basic') {
+      const encoded = window.btoa(`${auth.username}:${auth.password}`)
+      return `Basic ${encoded}`
+    } else {
+      return null;
+    }
+  }
+
+  const handleClickTab = (tab) => {
+    setTabIndex(tab)
+  }
+
+  const checkNextEnabled = () => {
+    if (completedTabs[tabIndex]) {
+      return true
+    }
+    return false
+  }
+
+  if (readOnly) {
+    const confirmationPage = tabs.find(tab => tab.name === 'Confirm')
+    return (
+      <div id="AlertForm">
+        <div className="tabs-container">
+          <div className="tabs-content">
+            {confirmationPage.content}
+          </div>
+        </div>
+      </div>
+    )
+  }
+  return (
+    <AlertsModalForm
+      alertType='HTTP'
+      stepsMaxIndex={5}
+      tabs={tabs}
+      tabIndex={tabIndex}
+      completedTabs={completedTabs}
+      setTabIndex={setTabIndex}
+      selectedAction={selectedAction}
+      handleClickTab={handleClickTab}
+      handleSave={handleSave}
+      handleNext={handleNext}
+      onClose={onClose}
+      checkNextEnabled={checkNextEnabled}
+    />
+  );
+};
+
+export default AlertActions;
